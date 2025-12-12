@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, useTemplateRef, watch } from 'vue';
+import { computed, ref, useCssModule, useTemplateRef, watch } from 'vue';
 import { N8nNavigationDropdown, N8nIcon, N8nButton, N8nText, N8nAvatar } from '@n8n/design-system';
 import { type ComponentProps } from 'vue-component-type-helpers';
 import {
@@ -82,6 +82,7 @@ const settingStore = useSettingsStore();
 const credentialsStore = useCredentialsStore();
 const projectStore = useProjectsStore();
 const telemetry = useTelemetry();
+const styles = useCssModule();
 
 const credentialsName = computed(() =>
 	selectedAgent
@@ -156,13 +157,13 @@ const menu = computed(() => {
 				id: provider,
 				title: providerDisplayNames[provider],
 				submenu: [
+					configureMenu,
+					{ isDivider: true as const, id: 'divider' },
 					{
 						id: `${provider}::loading`,
 						title: i18n.baseText('generic.loadingEllipsis'),
 						disabled: true,
 					},
-					{ isDivider: true as const, id: 'divider' },
-					configureMenu,
 				],
 			});
 			continue;
@@ -188,6 +189,7 @@ const menu = computed(() => {
 						capabilities: {
 							functionCalling: true,
 						},
+						available: true,
 					},
 				});
 			}
@@ -234,8 +236,12 @@ const menu = computed(() => {
 						} as const,
 					]
 				: []),
-			configureMenu,
 		]);
+
+		submenu.unshift(
+			configureMenu,
+			...(submenu.length > 1 ? [{ isDivider: true as const, id: 'divider' }] : []),
+		);
 
 		menuItems.push({
 			id: provider,
@@ -270,7 +276,6 @@ function openCredentialsSelectorOrCreate(provider: ChatHubLLMProvider) {
 			provider,
 			initialValue: credentials?.[provider] ?? null,
 			onSelect: handleSelectCredentials,
-			onCreateNew: handleCreateNewCredential,
 		},
 	});
 }
@@ -317,22 +322,12 @@ function onSelect(id: string) {
 	emit('change', parsedModel);
 }
 
-function handleCreateNewCredential(provider: ChatHubLLMProvider) {
-	const credentialType = PROVIDER_CREDENTIAL_TYPE_MAP[provider];
-
-	telemetry.track('User opened Credential modal', {
-		credential_type: credentialType,
-		source: 'chat',
-		new_credential: true,
-		workflow_id: null,
-	});
-
-	uiStore.openNewCredential(credentialType);
-}
-
 onClickOutside(
 	computed(() => dropdownRef.value?.$el),
 	() => dropdownRef.value?.close(),
+	{
+		ignore: [`.${styles.component} [role=menuitem]`],
+	},
 );
 
 // Update agents when credentials are updated
