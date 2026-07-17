@@ -1,8 +1,9 @@
 import { within } from '@testing-library/vue';
 import userEvent from '@testing-library/user-event';
+import { createTestingPinia } from '@pinia/testing';
 import { createComponentRenderer } from '@/__tests__/render';
 import OAuthClientsTable from '@/features/ai/mcpAccess/components/tabs/OAuthClientsTable.vue';
-import type { OAuthClientResponseDto } from '@n8n/api-types';
+import { createOAuthClient } from '@/features/ai/mcpAccess/mcp.test.utils';
 
 vi.mock('@/app/components/TimeAgo.vue', () => ({
 	default: {
@@ -12,17 +13,14 @@ vi.mock('@/app/components/TimeAgo.vue', () => ({
 	},
 }));
 
-const createComponent = createComponentRenderer(OAuthClientsTable);
+vi.mock('@/features/ai/mcpAccess/mcp.store', () => ({
+	useMCPStore: () => ({
+		openConnectPopover: vi.fn(),
+	}),
+}));
 
-const createClient = (overrides: Partial<OAuthClientResponseDto> = {}): OAuthClientResponseDto => ({
-	id: 'client-1',
-	name: 'Test Client',
-	createdAt: '2025-09-09T14:14:04.155Z',
-	updatedAt: '2025-09-09T14:14:04.155Z',
-	redirectUris: [],
-	grantTypes: ['authorization_code'],
-	tokenEndpointAuthMethod: 'client_secret_basic',
-	...overrides,
+const createComponent = createComponentRenderer(OAuthClientsTable, {
+	pinia: createTestingPinia(),
 });
 
 describe('OAuthClientsTable', () => {
@@ -59,10 +57,10 @@ describe('OAuthClientsTable', () => {
 	});
 
 	describe('Client rendering', () => {
-		it('should render client name and creation date', () => {
-			const client = createClient({
+		it('should render client name and connection date', () => {
+			const client = createOAuthClient({
 				name: 'My OAuth Client',
-				createdAt: '2025-10-15T10:30:00.000Z',
+				grantedAt: new Date('2025-10-15T10:30:00.000Z').getTime(),
 			});
 
 			const { getByTestId } = createComponent({
@@ -76,11 +74,41 @@ describe('OAuthClientsTable', () => {
 			expect(getByTestId('mcp-client-created-at')).toBeVisible();
 		});
 
+		it('should render the client type for recognized clients', () => {
+			const client = createOAuthClient({ name: 'Claude Code' });
+
+			const { getByTestId } = createComponent({
+				props: {
+					clients: [client],
+					loading: false,
+				},
+			});
+
+			expect(getByTestId('mcp-client-type')).toHaveTextContent('CLI');
+		});
+
+		it('should summarize granted scopes in the access column', () => {
+			const client = createOAuthClient({
+				scopes: ['workflow:read', 'execution:read', 'tag:read'],
+			});
+
+			const { getByTestId } = createComponent({
+				props: {
+					clients: [client],
+					loading: false,
+				},
+			});
+
+			expect(getByTestId('mcp-client-access')).toHaveTextContent(
+				'List workflows, Get execution details +1',
+			);
+		});
+
 		it('should render multiple clients in the table', () => {
 			const clients = [
-				createClient({ id: 'client-1', name: 'First Client' }),
-				createClient({ id: 'client-2', name: 'Second Client' }),
-				createClient({ id: 'client-3', name: 'Third Client' }),
+				createOAuthClient({ id: 'client-1', name: 'First Client' }),
+				createOAuthClient({ id: 'client-2', name: 'Second Client' }),
+				createOAuthClient({ id: 'client-3', name: 'Third Client' }),
 			];
 
 			const { getAllByTestId } = createComponent({
@@ -98,9 +126,9 @@ describe('OAuthClientsTable', () => {
 		});
 	});
 
-	describe('Actions menu', () => {
-		it('should emit revokeClient event when revoke action is clicked', async () => {
-			const client = createClient({ name: 'Client to Revoke' });
+	describe('Actions', () => {
+		it('should emit revokeClient event when the revoke button is clicked', async () => {
+			const client = createOAuthClient({ name: 'Client to Revoke' });
 
 			const { getByTestId, emitted } = createComponent({
 				props: {
@@ -109,13 +137,73 @@ describe('OAuthClientsTable', () => {
 				},
 			});
 
-			const actionToggle = getByTestId('mcp-oauth-client-action-toggle');
-			const toggleButton = within(actionToggle).getByRole('button');
-			await userEvent.click(toggleButton);
+			await userEvent.click(getByTestId('mcp-oauth-client-revoke-button'));
 
-			const menuItem = document.querySelector('[data-test-id="action-revokeClient"]');
-			expect(menuItem).not.toBeNull();
-			await userEvent.click(menuItem!);
+			expect(emitted('revokeClient')).toBeTruthy();
+			expect(emitted('revokeClient')[0]).toEqual([client]);
+		});
+	});
+
+	describe('Details modal', () => {
+		it('should open the details modal when a row is clicked', async () => {
+			const client = createOAuthClient({
+				name: 'Cursor',
+				scopes: ['workflow:read', 'workflow:write', 'execution:read'],
+			});
+
+			const { getByTestId, queryByTestId } = createComponent({
+				props: {
+					clients: [client],
+					loading: false,
+					scopeTools: {
+						'workflow:read': ['search_workflows', 'search_nodes'],
+						'workflow:write': ['update_workflow', 'search_nodes'],
+						'execution:read': ['get_execution'],
+					},
+				},
+			});
+
+			expect(queryByTestId('mcp-client-details-modal')).not.toBeInTheDocument();
+
+			await userEvent.click(getByTestId('mcp-client-name'));
+
+			const modal = document.querySelector('[data-test-id="mcp-client-details-modal"]');
+			expect(modal).not.toBeNull();
+
+			// granted scope tokens are grouped per resource, with read/write tags
+			const workflowGroup = within(modal as HTMLElement).getByTestId(
+				'mcp-client-details-group-workflow',
+			);
+			expect(workflowGroup).toHaveTextContent('Workflow');
+			expect(workflowGroup).toHaveTextContent('workflow:read');
+			expect(workflowGroup).toHaveTextContent('workflow:write');
+			expect(workflowGroup).toHaveTextContent('Read');
+			expect(workflowGroup).toHaveTextContent('Write');
+
+			const executionGroup = within(modal as HTMLElement).getByTestId(
+				'mcp-client-details-group-execution',
+			);
+			expect(executionGroup).toHaveTextContent('Execution');
+			expect(executionGroup).toHaveTextContent('execution:read');
+		});
+
+		it('should emit revokeClient from the details modal revoke button', async () => {
+			const client = createOAuthClient({ name: 'Client to Revoke' });
+
+			const { getByTestId, emitted } = createComponent({
+				props: {
+					clients: [client],
+					loading: false,
+				},
+			});
+
+			await userEvent.click(getByTestId('mcp-client-name'));
+
+			const revokeButton = document.querySelector(
+				'[data-test-id="mcp-client-details-revoke"]',
+			) as HTMLElement;
+			expect(revokeButton).not.toBeNull();
+			await userEvent.click(revokeButton);
 
 			expect(emitted('revokeClient')).toBeTruthy();
 			expect(emitted('revokeClient')[0]).toEqual([client]);

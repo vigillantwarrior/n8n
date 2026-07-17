@@ -1,31 +1,41 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue';
-import type { INodeCreateElement } from '@/Interface';
+import type { INodeCreateElement, NodeFilterType, SimplifiedNodeType } from '@/Interface';
 import {
-	AI_OTHERS_NODE_CREATOR_VIEW,
+	AI_EVALUATION,
 	AI_NODE_CREATOR_VIEW,
+	AI_OTHERS_NODE_CREATOR_VIEW,
+	AI_UNCATEGORIZED_CATEGORY,
+	HUMAN_IN_THE_LOOP_CATEGORY,
 	REGULAR_NODE_CREATOR_VIEW,
 	TRIGGER_NODE_CREATOR_VIEW,
-	AI_UNCATEGORIZED_CATEGORY,
-	AI_EVALUATION,
 } from '@/app/constants';
+import { computed, onMounted, onUnmounted, watch } from 'vue';
 
 import { useNodeCreatorStore } from '@/features/shared/nodeCreator/nodeCreator.store';
 
-import { TriggerView, RegularView, AIView, AINodesView } from '../../views/viewsData';
-import { useViewStacks } from '../../composables/useViewStacks';
-import { useKeyboardNavigation } from '../../composables/useKeyboardNavigation';
-import SearchBar from './SearchBar.vue';
-import ActionsRenderer from '../Modes/ActionsMode.vue';
-import NodesRenderer from '../Modes/NodesMode.vue';
-import { useI18n } from '@n8n/i18n';
-import { useDebounce } from '@/app/composables/useDebounce';
 import NodeIcon from '@/app/components/NodeIcon.vue';
+import { getNodeIconSize } from '@/app/utils/nodeIcon';
+import { useDebounce } from '@/app/composables/useDebounce';
+import { useI18n } from '@n8n/i18n';
+import { useKeyboardNavigation } from '../../composables/useKeyboardNavigation';
+import { useViewStacks, type ViewStack } from '../../composables/useViewStacks';
+import {
+	AINodesView,
+	AIView,
+	HitlToolView,
+	RegularView,
+	TriggerView,
+	type NodeView,
+} from '../../views/viewsData';
+import ActionsRenderer from '../Modes/ActionsMode.vue';
+import AgentsRenderer from '../Modes/AgentsMode.vue';
+import NodesRenderer from '../Modes/NodesMode.vue';
+import SearchBar from './SearchBar.vue';
 
 import CommunityNodeDetails from '@/features/settings/communityNodes/components/nodeCreator/CommunityNodeDetails.vue';
-import CommunityNodeInfo from '@/features/settings/communityNodes/components/nodeCreator/CommunityNodeInfo.vue';
 import CommunityNodeDocsLink from '@/features/settings/communityNodes/components/nodeCreator/CommunityNodeDocsLink.vue';
 import CommunityNodeFooter from '@/features/settings/communityNodes/components/nodeCreator/CommunityNodeFooter.vue';
+import CommunityNodeInfo from '@/features/settings/communityNodes/components/nodeCreator/CommunityNodeInfo.vue';
 import { useUsersStore } from '@/features/settings/users/users.store';
 
 import { N8nIcon, N8nNotice } from '@n8n/design-system';
@@ -37,7 +47,7 @@ const { pushViewStack, popViewStack, updateCurrentViewStack } = useViewStacks();
 const { setActiveItemIndex, attachKeydownEvent, detachKeydownEvent } = useKeyboardNavigation();
 const nodeCreatorStore = useNodeCreatorStore();
 
-const { isInstanceOwner } = useUsersStore();
+const { isAdminOrOwner } = useUsersStore();
 
 const activeViewStack = computed(() => useViewStacks().activeViewStack);
 
@@ -46,6 +56,8 @@ const communityNodeDetails = computed(() => activeViewStack.value.communityNodeD
 const viewStacks = computed(() => useViewStacks().viewStacks);
 
 const isActionsMode = computed(() => useViewStacks().activeViewStackMode === 'actions');
+
+const isAgentsMode = computed(() => useViewStacks().activeViewStackMode === 'agents');
 
 const searchPlaceholder = computed(() => {
 	let node = activeViewStack.value?.title as string;
@@ -60,6 +72,10 @@ const searchPlaceholder = computed(() => {
 		});
 	}
 
+	if (isAgentsMode.value) {
+		return i18n.baseText('nodeCreator.agentsPanel.searchPlaceholder');
+	}
+
 	return i18n.baseText('nodeCreator.searchBar.searchNodes');
 });
 
@@ -72,6 +88,13 @@ const nodeCreatorView = computed(() => useNodeCreatorStore().selectedView);
 
 const isCommunityNodeActionsMode = computed(() => {
 	return communityNodeDetails.value && isActionsMode.value && activeViewStack.value.subcategory;
+});
+
+const viewStackTitle = computed(() => {
+	if (nodeCreatorStore.openingContext === 'replacement') {
+		return i18n.baseText('nodeCreator.replaceNode.title');
+	}
+	return activeViewStack.value.title;
 });
 
 function getDefaultActiveIndex(search: string = ''): number {
@@ -107,7 +130,12 @@ function onSearch(value: string) {
 }
 
 function onTransitionEnd() {
+	cleanupopeningContext();
 	void setActiveItemIndex(getDefaultActiveIndex());
+}
+
+function cleanupopeningContext() {
+	nodeCreatorStore.openingContext = null;
 }
 
 onMounted(() => {
@@ -116,41 +144,56 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+	cleanupopeningContext();
 	detachKeydownEvent();
 });
 
 watch(
 	() => nodeCreatorView.value,
 	(selectedView) => {
-		const views = {
+		const views: Record<NodeFilterType, (nodes: SimplifiedNodeType[]) => NodeView> = {
 			[TRIGGER_NODE_CREATOR_VIEW]: TriggerView,
 			[REGULAR_NODE_CREATOR_VIEW]: RegularView,
 			[AI_NODE_CREATOR_VIEW]: AIView,
 			[AI_OTHERS_NODE_CREATOR_VIEW]: AINodesView,
 			[AI_UNCATEGORIZED_CATEGORY]: AINodesView,
 			[AI_EVALUATION]: AINodesView,
+			[HUMAN_IN_THE_LOOP_CATEGORY]: HitlToolView,
 		};
 
-		const itemKey = selectedView;
-		const matchedView = views[itemKey];
+		const additionalOptions: Partial<Record<NodeFilterType, Partial<ViewStack>>> = {
+			// is a root view, but it should behave like a subcategory view
+			[HUMAN_IN_THE_LOOP_CATEGORY]: {
+				hasSearch: false,
+			},
+		};
+
+		const matchedView = views[selectedView];
 
 		if (!matchedView) {
-			console.warn(`No view found for ${itemKey}`);
+			console.warn(`No view found for ${selectedView}`);
 			return;
 		}
 		const view = matchedView(mergedNodes);
-
-		pushViewStack({
+		const viewStack: ViewStack = {
 			title: view.title,
 			subtitle: view?.subtitle ?? '',
 			items: view.items as INodeCreateElement[],
+			nodeIcon: view.nodeIcon,
 			info: view.info,
 			hasSearch: true,
 			mode: 'nodes',
 			rootView: selectedView,
 			// Root search should include all nodes
 			searchItems: mergedNodes,
-		});
+			...additionalOptions[selectedView],
+		};
+		pushViewStack(viewStack);
+
+		const pending = nodeCreatorStore.consumePendingInitialViewStack();
+		if (pending) {
+			pushViewStack(pending);
+		}
 	},
 	{ immediate: true },
 );
@@ -193,9 +236,16 @@ function onBackButton() {
 						:icon-source="activeViewStack.nodeIcon"
 						:circle="false"
 						:show-tooltip="false"
-						:size="20"
+						:size="
+							getNodeIconSize(
+								'nodeList',
+								activeViewStack.nodeIcon?.type === 'icon'
+									? activeViewStack.nodeIcon.name
+									: undefined,
+							)
+						"
 					/>
-					<p v-if="activeViewStack.title" :class="$style.title" v-text="activeViewStack.title" />
+					<p v-if="activeViewStack.title" :class="$style.title" v-text="viewStackTitle" />
 
 					<CommunityNodeDocsLink
 						v-if="communityNodeDetails"
@@ -232,6 +282,9 @@ function onBackButton() {
 				<!-- Actions mode -->
 				<ActionsRenderer v-if="isActionsMode && activeViewStack.subcategory" v-bind="$attrs" />
 
+				<!-- Agents mode -->
+				<AgentsRenderer v-else-if="isAgentsMode" v-bind="$attrs" />
+
 				<!-- Nodes Mode -->
 				<NodesRenderer v-else :root-view="nodeCreatorView" v-bind="$attrs" />
 			</div>
@@ -239,7 +292,7 @@ function onBackButton() {
 			<CommunityNodeFooter
 				v-if="communityNodeDetails && !isCommunityNodeActionsMode"
 				:package-name="communityNodeDetails.packageName"
-				:show-manage="communityNodeDetails.installed && isInstanceOwner"
+				:show-manage="communityNodeDetails.installed && isAdminOrOwner"
 			/>
 		</aside>
 	</Transition>
@@ -285,7 +338,7 @@ function onBackButton() {
 }
 .nodeIcon {
 	--node--icon--size: 20px;
-	--node--icon--color: var(--color--text);
+	--node-creator--icon--color: var(--node--icon--color--neutral);
 	margin-right: var(--spacing--sm);
 }
 .renderedItems {

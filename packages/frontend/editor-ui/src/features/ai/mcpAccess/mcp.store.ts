@@ -1,45 +1,73 @@
 import { defineStore } from 'pinia';
-import { MCP_STORE } from './mcp.constants';
-import { useWorkflowsStore } from '@/app/stores/workflows.store';
-import type { WorkflowListItem } from '@/Interface';
+import { MCP_ENDPOINT, MCP_STORE } from './mcp.constants';
+import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
+import {
+	useWorkflowDocumentStore,
+	createWorkflowDocumentId,
+} from '@/app/stores/workflowDocument.store';
+import type { IWorkflowSettings, WorkflowListItem } from '@/Interface';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import {
 	updateMcpSettings,
-	toggleWorkflowMcpAccessApi,
+	toggleWorkflowsMcpAccessApi,
 	fetchApiKey,
 	rotateApiKey,
 	fetchOAuthClients,
+	fetchInstanceMcpClientStats,
 	deleteOAuthClient,
+	fetchMcpEligibleWorkflows,
+	getAllowedRedirectUris,
+	updateAllowedRedirectUris,
+	type ToggleWorkflowsMcpAccessResponse,
+	type ToggleWorkflowsMcpAccessTarget,
 } from '@/features/ai/mcpAccess/mcp.api';
 import { computed, ref } from 'vue';
 import { useSettingsStore } from '@/app/stores/settings.store';
 import { isWorkflowListItem } from '@/app/utils/typeGuards';
-import type { ApiKey, OAuthClientResponseDto, DeleteOAuthClientResponseDto } from '@n8n/api-types';
+import type {
+	ApiKey,
+	InstanceMcpClientStatsResponseDto,
+	OAuthClientResponseDto,
+	DeleteOAuthClientResponseDto,
+} from '@n8n/api-types';
+import { i18n } from '@n8n/i18n';
 
 export const useMCPStore = defineStore(MCP_STORE, () => {
-	const workflowsStore = useWorkflowsStore();
+	const workflowsListStore = useWorkflowsListStore();
 	const rootStore = useRootStore();
 	const settingsStore = useSettingsStore();
 
 	const currentUserMCPKey = ref<ApiKey | null>(null);
 	const oauthClients = ref<OAuthClientResponseDto[]>([]);
+	const oauthClientScopeTools = ref<Record<string, string[]> | undefined>(undefined);
+	const allowedRedirectUris = ref<string[]>([]);
+	const instanceClientStats = ref<InstanceMcpClientStatsResponseDto | null>(null);
+	const connectPopoverOpen = ref(false);
 
 	const mcpAccessEnabled = computed(() => !!settingsStore.moduleSettings.mcp?.mcpAccessEnabled);
+	const mcpManagedByEnv = computed(() => !!settingsStore.moduleSettings.mcp?.mcpManagedByEnv);
+
+	// Backend-provided canonical URL, so a configured dedicated MCP base URL is
+	// reflected; the editor-base fallback covers settings not yet loaded.
+	const serverUrl = computed(
+		() =>
+			settingsStore.moduleSettings.mcp?.serverUrl ?? `${rootStore.urlBaseEditor}${MCP_ENDPOINT}`,
+	);
 
 	async function fetchWorkflowsAvailableForMCP(
 		page = 1,
 		pageSize = 50,
-	): Promise<WorkflowListItem[]> {
-		const workflows = await workflowsStore.fetchWorkflowsPage(
+	): Promise<{ data: WorkflowListItem[]; count: number }> {
+		const { data, count } = await workflowsListStore.fetchWorkflowsPageWithCount(
 			undefined, // projectId
 			page,
 			pageSize,
 			'updatedAt:desc',
 			{ isArchived: false, availableInMCP: true },
 			false, // includeFolders
-			false, // includeAllVersions
+			false, // onlySharedWithMe
 		);
-		return workflows.filter(isWorkflowListItem);
+		return { data: data.filter(isWorkflowListItem), count };
 	}
 
 	async function setMcpAccessEnabled(enabled: boolean): Promise<boolean> {
@@ -48,41 +76,77 @@ export const useMCPStore = defineStore(MCP_STORE, () => {
 			enabled,
 		);
 		settingsStore.moduleSettings.mcp = {
+			mcpManagedByEnv: false,
 			...(settingsStore.moduleSettings.mcp ?? {}),
 			mcpAccessEnabled: updated,
 		};
 		return updated;
 	}
 
+	function applyAvailableInMCPToLocalStores(workflowId: string, availableInMCP: boolean) {
+		const existing = workflowsListStore.workflowsById[workflowId];
+		if (existing) {
+			if (existing.settings) {
+				existing.settings.availableInMCP = availableInMCP;
+			} else {
+				existing.settings = { availableInMCP } as IWorkflowSettings;
+			}
+		}
+
+		const workflowDocumentStore = useWorkflowDocumentStore(createWorkflowDocumentId(workflowId));
+		workflowDocumentStore.mergeSettings({ availableInMCP });
+	}
+
+	// Toggle MCP access for a single workflow
 	async function toggleWorkflowMcpAccess(
 		workflowId: string,
 		availableInMCP: boolean,
-	): Promise<{
-		id: string;
-		settings: { availableInMCP?: boolean } | undefined;
-		versionId: string;
-	}> {
-		const response = await toggleWorkflowMcpAccessApi(
+	): Promise<ToggleWorkflowsMcpAccessResponse> {
+		const response = await toggleWorkflowsMcpAccessApi(
 			rootStore.restApiContext,
-			workflowId,
+			{ workflowIds: [workflowId] },
 			availableInMCP,
 		);
 
-		const { id, settings, versionId } = response;
+		const confirmedIds = new Set([
+			...(response.updatedIds ?? []),
+			...(response.unchangedIds ?? []),
+		]);
 
-		// Update local  version of the workflow
-		if (id === workflowsStore.workflowId) {
-			workflowsStore.setWorkflowVersionId(versionId);
-			if (settings) {
-				workflowsStore.private.setWorkflowSettings(settings);
-			}
+		if (!confirmedIds.has(workflowId)) {
+			throw new Error(
+				i18n.baseText('workflowSettings.toggleMCP.updateSkippedError', {
+					interpolate: { workflowId },
+				}),
+			);
 		}
-		if (workflowsStore.workflowsById[id]) {
-			workflowsStore.workflowsById[id] = {
-				...workflowsStore.workflowsById[id],
-				settings,
-				versionId,
-			};
+
+		applyAvailableInMCPToLocalStores(workflowId, availableInMCP);
+
+		return response;
+	}
+
+	/**
+	 * Bulk-toggle MCP availability, scoped by an id list, a project,
+	 * or a folder (+ descendants)
+	 */
+	async function toggleWorkflowsMcpAccess(
+		target: ToggleWorkflowsMcpAccessTarget,
+		availableInMCP: boolean,
+	): Promise<ToggleWorkflowsMcpAccessResponse> {
+		const response = await toggleWorkflowsMcpAccessApi(
+			rootStore.restApiContext,
+			target,
+			availableInMCP,
+		);
+
+		const confirmedIds = new Set([
+			...(response.updatedIds ?? []),
+			...(response.unchangedIds ?? []),
+		]);
+
+		for (const id of confirmedIds) {
+			applyAvailableInMCPToLocalStores(id, availableInMCP);
 		}
 
 		return response;
@@ -107,7 +171,21 @@ export const useMCPStore = defineStore(MCP_STORE, () => {
 	async function getAllOAuthClients(): Promise<OAuthClientResponseDto[]> {
 		const response = await fetchOAuthClients(rootStore.restApiContext);
 		oauthClients.value = response.data;
+		oauthClientScopeTools.value = response.scopeTools;
 		return response.data;
+	}
+
+	async function getInstanceClientStats(): Promise<InstanceMcpClientStatsResponseDto | null> {
+		try {
+			const stats = await fetchInstanceMcpClientStats(rootStore.restApiContext);
+			instanceClientStats.value = stats;
+			return stats;
+		} catch {
+			// Endpoint is admin-only; non-admin members get 403. Swallow silently
+			// so the settings page still renders for them.
+			instanceClientStats.value = null;
+			return null;
+		}
 	}
 
 	async function removeOAuthClient(clientId: string): Promise<DeleteOAuthClientResponseDto> {
@@ -117,17 +195,57 @@ export const useMCPStore = defineStore(MCP_STORE, () => {
 		return response;
 	}
 
+	async function getMcpEligibleWorkflows(options?: {
+		take?: number;
+		skip?: number;
+		query?: string;
+	}): Promise<{ count: number; data: WorkflowListItem[] }> {
+		return await fetchMcpEligibleWorkflows(rootStore.restApiContext, options);
+	}
+
+	function openConnectPopover(): void {
+		connectPopoverOpen.value = true;
+	}
+
+	function closeConnectPopover(): void {
+		connectPopoverOpen.value = false;
+	}
+
+	async function fetchAllowedRedirectUris(): Promise<string[]> {
+		const response = await getAllowedRedirectUris(rootStore.restApiContext);
+		allowedRedirectUris.value = response.uris;
+		return response.uris;
+	}
+
+	async function setAllowedRedirectUris(uris: string[]): Promise<void> {
+		await updateAllowedRedirectUris(rootStore.restApiContext, uris);
+		allowedRedirectUris.value = uris;
+	}
+
 	return {
 		mcpAccessEnabled,
+		mcpManagedByEnv,
+		serverUrl,
 		fetchWorkflowsAvailableForMCP,
 		setMcpAccessEnabled,
 		toggleWorkflowMcpAccess,
+		toggleWorkflowsMcpAccess,
 		currentUserMCPKey,
 		getOrCreateApiKey,
 		generateNewApiKey,
 		resetCurrentUserMCPKey,
 		oauthClients,
+		instanceClientStats,
 		getAllOAuthClients,
+		oauthClientScopeTools,
+		getInstanceClientStats,
 		removeOAuthClient,
+		getMcpEligibleWorkflows,
+		allowedRedirectUris,
+		fetchAllowedRedirectUris,
+		setAllowedRedirectUris,
+		connectPopoverOpen,
+		openConnectPopover,
+		closeConnectPopover,
 	};
 });

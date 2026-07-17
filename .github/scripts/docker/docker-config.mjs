@@ -31,7 +31,7 @@ class BuildContext {
 				case 'pull_request':
 					context.version = `pr-${pr}`;
 					context.release_type = 'dev';
-					context.push_to_ghcr = false;
+					context.platforms = ['linux/amd64'];
 					break;
 
 				case 'workflow_dispatch':
@@ -88,7 +88,7 @@ class BuildContext {
 	buildMatrix(platforms) {
 		const runners = {
 			'linux/amd64': 'blacksmith-4vcpu-ubuntu-2204',
-			'linux/arm64': 'blacksmith-4vcpu-ubuntu-2204-arm',
+			'linux/arm64': 'blacksmith-8vcpu-ubuntu-2204-arm',
 		};
 
 		const matrix = {

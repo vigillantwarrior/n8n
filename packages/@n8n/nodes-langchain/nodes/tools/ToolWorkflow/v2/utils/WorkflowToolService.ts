@@ -27,10 +27,7 @@ import {
 	sleepWithAbort,
 } from 'n8n-workflow';
 
-import {
-	createZodSchemaFromArgs,
-	extractFromAIParameters,
-} from '../../../../../utils/fromAIToolFactory';
+import { createZodSchemaFromArgs, extractFromAIParameters } from '@n8n/ai-utilities';
 
 function isNodeExecutionData(data: unknown): data is INodeExecutionData[] {
 	return isArray(data) && Boolean(data.length) && isObject(data[0]) && 'json' in data[0];
@@ -193,15 +190,26 @@ export class WorkflowToolService {
 
 					if (manualLogging) {
 						const metadata = parseErrorMetadata(error);
+						// Wrap error in INodeExecutionData format so it can be properly processed
+						// by buildSteps and displayed in the UI execution data
+						const errorData: INodeExecutionData[] = [{ json: { error: errorResponse } }];
 						void context.addOutputData(
 							NodeConnectionTypes.AiTool,
 							localRunIndex,
-							executionError,
+							[errorData],
 							metadata,
 						);
 					}
 
 					if (tryIndex === maxTries - 1) {
+						// When called by the engine (manualLogging=false), throw so
+						// workflow-execute records the failure against this tool run.
+						// Continue-on-fail for AI tools still surfaces the error to the
+						// agent so it can iterate. The legacy agent-direct path keeps
+						// returning the error string for backwards compatibility.
+						if (!manualLogging) {
+							throw executionError;
+						}
 						return errorResponse;
 					}
 				}
@@ -259,6 +267,7 @@ export class WorkflowToolService {
 					executionId: workflowProxy.$execution.id,
 					workflowId: workflowProxy.$workflow.id,
 				},
+				returnLastRunOnly: true, // The tool's answer is the sub-workflow's final-run output, not its internal multi-run computation.
 			});
 			// Set sub-workflow execution id so it can be used in other places
 			this.subExecutionId = receivedData.executionId;
@@ -424,8 +433,9 @@ export class WorkflowToolService {
 			return new DynamicTool({ name, description, func });
 		}
 
-		// Otherwise, prepare Zod schema and create a structured tool
+		// Prepare Zod schema for the structured tool
 		const schema = createZodSchemaFromArgs(collectedArguments);
+
 		return new DynamicStructuredTool({ schema, name, description, func });
 	}
 }

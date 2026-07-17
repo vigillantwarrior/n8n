@@ -1,10 +1,8 @@
 import { z } from 'zod';
-import { Z } from 'zod-class';
 
-/**
- * DTO for OAuth client response (excludes sensitive data like clientSecret)
- */
-export class OAuthClientResponseDto extends Z.class({
+import { Z } from '../../zod-class';
+
+const oauthClientShape = {
 	id: z.string(),
 	name: z.string(),
 	redirectUris: z.array(z.string()),
@@ -12,24 +10,25 @@ export class OAuthClientResponseDto extends Z.class({
 	tokenEndpointAuthMethod: z.string(),
 	createdAt: z.string().datetime(), // Using string for date serialization over HTTP
 	updatedAt: z.string().datetime(),
-}) {}
+	/** Unix ms when the user granted access on the consent screen. */
+	grantedAt: z.number(),
+	/** Scopes granted on the consent screen. */
+	scopes: z.array(z.string()),
+};
+
+/**
+ * DTO for OAuth client response (excludes sensitive data like clientSecret)
+ */
+export class OAuthClientResponseDto extends Z.class(oauthClientShape) {}
 
 /**
  * DTO for listing OAuth clients response
  */
 export class ListOAuthClientsResponseDto extends Z.class({
-	data: z.array(
-		z.object({
-			id: z.string(),
-			name: z.string(),
-			redirectUris: z.array(z.string()),
-			grantTypes: z.array(z.string()),
-			tokenEndpointAuthMethod: z.string(),
-			createdAt: z.string().datetime(),
-			updatedAt: z.string().datetime(),
-		}),
-	),
+	data: z.array(z.object(oauthClientShape)),
 	count: z.number(),
+	/** Tool names each grantable scope unlocks on this instance, for the client details view. */
+	scopeTools: z.record(z.array(z.string())).optional(),
 }) {}
 
 /**
@@ -38,4 +37,13 @@ export class ListOAuthClientsResponseDto extends Z.class({
 export class DeleteOAuthClientResponseDto extends Z.class({
 	success: z.boolean(),
 	message: z.string(),
+}) {}
+
+/**
+ * DTO for instance-wide MCP OAuth client capacity stats (admin-only)
+ */
+export class InstanceMcpClientStatsResponseDto extends Z.class({
+	count: z.number(),
+	limit: z.number(),
+	atCapacity: z.boolean(),
 }) {}

@@ -1,12 +1,11 @@
+import type { WorkBook, WritingOptions } from '@e965/xlsx';
+import { utils as xlsxUtils, write as xlsxWrite } from '@e965/xlsx';
+import { flattenObject } from '@utils/utilities';
 import iconv from 'iconv-lite';
 import get from 'lodash/get';
 import type { IBinaryData, IDataObject, IExecuteFunctions, INodeExecutionData } from 'n8n-workflow';
 import { NodeOperationError, BINARY_ENCODING } from 'n8n-workflow';
 import type { TextContent as PdfTextContent } from 'pdfjs-dist/types/src/display/api';
-import type { WorkBook, WritingOptions } from 'xlsx';
-import { utils as xlsxUtils, write as xlsxWrite } from 'xlsx';
-
-import { flattenObject } from '@utils/utilities';
 
 export type JsonToSpreadsheetBinaryFormat = 'csv' | 'html' | 'rtf' | 'ods' | 'xls' | 'xlsx';
 
@@ -165,6 +164,12 @@ export async function extractDataFromPDF(
 		buffer = Buffer.from(binaryData.data, BINARY_ENCODING);
 	}
 
+	// Polyfill DOMMatrix for pdfjs-dist in Node.js environments without canvas
+	if (typeof globalThis.DOMMatrix === 'undefined') {
+		const { default: DOMMatrix } = await import('@thednp/dommatrix');
+		globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
+	}
+
 	const { getDocument: readPDF, version: pdfJsVersion } = await import(
 		'pdfjs-dist/legacy/build/pdf.mjs'
 	);
@@ -202,4 +207,10 @@ export async function extractDataFromPDF(
 	};
 
 	return returnData;
+}
+
+export function prepareBinariesDataList(data: string | string[] | IBinaryData | IBinaryData[]) {
+	if (Array.isArray(data)) return data;
+	if (typeof data === 'object') return [data];
+	return data.split(',').map((item: string) => item.trim());
 }

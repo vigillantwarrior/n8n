@@ -1,55 +1,22 @@
-import { within } from '@testing-library/vue';
+import { waitFor, within } from '@testing-library/vue';
 import userEvent from '@testing-library/user-event';
 import { createComponentRenderer } from '@/__tests__/render';
+import { getTooltip } from '@/__tests__/utils';
 import WorkflowsTable from '@/features/ai/mcpAccess/components/tabs/WorkflowsTable.vue';
-import type { WorkflowListItem } from '@/Interface';
-
-const { mockRouterPush } = vi.hoisted(() => ({
-	mockRouterPush: vi.fn(),
-}));
+import { createWorkflow } from '@/features/ai/mcpAccess/mcp.test.utils';
 
 vi.mock('@/app/router', () => ({
 	default: {
 		resolve: vi.fn(({ name, params }) => ({
 			fullPath:
-				name === 'NodeViewExisting' ? `/workflows/${params.name}` : `/projects/${params.projectId}`,
+				name === 'NodeViewExisting'
+					? `/workflows/${params.workflowId}`
+					: `/projects/${params.projectId}`,
 		})),
-		push: mockRouterPush,
 	},
 }));
 
 const createComponent = createComponentRenderer(WorkflowsTable);
-
-const createWorkflow = (overrides: Partial<WorkflowListItem> = {}): WorkflowListItem => ({
-	resource: 'workflow',
-	id: 'test-workflow-1',
-	createdAt: '2025-09-09T14:14:04.155Z',
-	updatedAt: '2025-09-23T08:13:45.000Z',
-	name: 'Test Workflow',
-	active: true,
-	activeVersionId: 'v1',
-	isArchived: false,
-	settings: {
-		availableInMCP: true,
-		executionOrder: 'v1',
-	},
-	versionId: 'v1',
-	tags: [],
-	scopes: ['workflow:read', 'workflow:update'],
-	homeProject: {
-		id: 'project1',
-		type: 'team',
-		name: 'Test Project',
-		icon: {
-			type: 'icon',
-			value: 'bot',
-		},
-		createdAt: '2025-09-09T14:13:50.000Z',
-		updatedAt: '2025-09-09T14:13:50.000Z',
-	},
-	sharedWithProjects: [],
-	...overrides,
-});
 
 describe('WorkflowsTable', () => {
 	afterEach(() => {
@@ -66,11 +33,10 @@ describe('WorkflowsTable', () => {
 			});
 
 			expect(getByTestId('mcp-workflow-table-empty-state')).toBeVisible();
-			expect(getByTestId('mcp-workflow-table-empty-state-description')).toBeVisible();
 		});
 
-		it('should navigate to workflows list when button is clicked', async () => {
-			const { getByTestId } = createComponent({
+		it('should emit connectWorkflows event when button is clicked', async () => {
+			const { getByTestId, emitted } = createComponent({
 				props: {
 					workflows: [],
 					loading: false,
@@ -80,7 +46,7 @@ describe('WorkflowsTable', () => {
 			const button = getByTestId('mcp-workflow-table-empty-state-button');
 			await userEvent.click(button);
 
-			expect(mockRouterPush).toHaveBeenCalledWith({ name: 'WorkflowsView' });
+			expect(emitted('connectWorkflows')).toBeTruthy();
 		});
 	});
 
@@ -95,6 +61,139 @@ describe('WorkflowsTable', () => {
 
 			expect(container.querySelector('.n8n-loading')).toBeInTheDocument();
 			expect(queryByTestId('mcp-workflow-table')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('Pagination', () => {
+		const createWorkflows = (count: number) =>
+			Array.from({ length: count }, (_, index) =>
+				createWorkflow({ id: `workflow-${index + 1}`, name: `Workflow ${index + 1}` }),
+			);
+
+		it('should render pagination when total count exceeds page size', () => {
+			const { getByTestId } = createComponent({
+				props: {
+					workflows: createWorkflows(10),
+					totalCount: 11,
+					loading: false,
+				},
+			});
+
+			expect(getByTestId('pagination')).toBeVisible();
+		});
+
+		it('should emit table options when page changes', async () => {
+			const { getByTestId, emitted } = createComponent({
+				props: {
+					workflows: createWorkflows(10),
+					totalCount: 20,
+					loading: false,
+				},
+			});
+
+			await userEvent.click(within(getByTestId('pagination')).getByLabelText('page 2'));
+
+			await waitFor(() => {
+				expect(emitted('update:options')).toBeTruthy();
+			});
+			expect(emitted('update:options').at(-1)).toEqual([
+				expect.objectContaining({ page: 1, itemsPerPage: 10 }),
+			]);
+		});
+	});
+
+	describe('Bulk selection', () => {
+		const selectableWorkflows = () => [
+			createWorkflow({ id: 'wf-1', name: 'Workflow 1' }),
+			createWorkflow({ id: 'wf-2', name: 'Workflow 2' }),
+		];
+
+		const getRowCheckboxes = (container: Element) =>
+			container.querySelectorAll<HTMLElement>('tbody [role="checkbox"]');
+
+		it('should emit bulkRemoveMcpAccess with the selected workflow ids', async () => {
+			const { container, getByTestId, emitted } = createComponent({
+				props: { workflows: selectableWorkflows(), totalCount: 2, loading: false },
+			});
+
+			const rowCheckboxes = getRowCheckboxes(container);
+			expect(rowCheckboxes.length).toBe(2);
+
+			await userEvent.click(rowCheckboxes[0]);
+
+			expect(getByTestId('selected-items-info')).toBeVisible();
+
+			await userEvent.click(getByTestId('mcp-bulk-remove-access-button'));
+
+			expect(emitted('bulkRemoveMcpAccess')).toEqual([[['wf-1']]]);
+		});
+
+		it('should select every selectable row via the header checkbox', async () => {
+			const { container, getByTestId, emitted } = createComponent({
+				props: { workflows: selectableWorkflows(), totalCount: 2, loading: false },
+			});
+
+			const headerCheckbox = container.querySelector<HTMLElement>('thead [role="checkbox"]');
+			expect(headerCheckbox).not.toBeNull();
+			await userEvent.click(headerCheckbox!);
+
+			await userEvent.click(getByTestId('mcp-bulk-remove-access-button'));
+
+			expect(emitted('bulkRemoveMcpAccess')).toEqual([[['wf-1', 'wf-2']]]);
+		});
+
+		it('should disable selection for workflows the user cannot update', () => {
+			const { container } = createComponent({
+				props: {
+					workflows: [
+						createWorkflow({ id: 'wf-1' }),
+						createWorkflow({ id: 'wf-2', scopes: ['workflow:read'] }),
+					],
+					totalCount: 2,
+					loading: false,
+				},
+			});
+
+			const rowCheckboxes = getRowCheckboxes(container);
+			expect(rowCheckboxes[0]).not.toBeDisabled();
+			expect(rowCheckboxes[1]).toBeDisabled();
+		});
+
+		it('should clear the selection from the selection bar', async () => {
+			const { container, getByTestId, queryByTestId } = createComponent({
+				props: { workflows: selectableWorkflows(), totalCount: 2, loading: false },
+			});
+
+			const rowCheckbox = getRowCheckboxes(container)[0];
+			await userEvent.click(rowCheckbox);
+			expect(getByTestId('selected-items-info')).toBeVisible();
+			expect(rowCheckbox).toHaveAttribute('aria-checked', 'true');
+
+			await userEvent.click(getByTestId('clear-selection-button'));
+
+			expect(queryByTestId('selected-items-info')).not.toBeInTheDocument();
+			await waitFor(() => {
+				expect(rowCheckbox).toHaveAttribute('aria-checked', 'false');
+			});
+		});
+
+		it('should reset the selection when the workflows list reloads', async () => {
+			const { container, getByTestId, queryByTestId, rerender } = createComponent({
+				props: { workflows: selectableWorkflows(), totalCount: 2, loading: false },
+			});
+
+			await userEvent.click(getRowCheckboxes(container)[0]);
+			expect(getByTestId('selected-items-info')).toBeVisible();
+
+			await rerender({
+				workflows: [createWorkflow({ id: 'wf-3', name: 'Workflow 3' })],
+				totalCount: 1,
+				loading: false,
+			});
+
+			await waitFor(() => {
+				expect(queryByTestId('selected-items-info')).not.toBeInTheDocument();
+			});
 		});
 	});
 
@@ -121,9 +220,9 @@ describe('WorkflowsTable', () => {
 			});
 
 			expect(getByTestId('mcp-workflow-name')).toHaveTextContent('Workflow In Project Root');
-			expect(getByTestId('mcp-workflow-project-name')).toHaveTextContent('My Project');
-			expect(queryByTestId('mcp-workflow-folder-name')).not.toBeInTheDocument();
-			expect(queryByTestId('mcp-workflow-ellipsis-separator')).not.toBeInTheDocument();
+			expect(getByTestId('workflow-location-project-name')).toHaveTextContent('My Project');
+			expect(queryByTestId('workflow-location-folder-name')).not.toBeInTheDocument();
+			expect(queryByTestId('workflow-location-ellipsis-separator')).not.toBeInTheDocument();
 		});
 
 		it('should render personal project name correctly', () => {
@@ -145,7 +244,7 @@ describe('WorkflowsTable', () => {
 				},
 			});
 
-			expect(getByTestId('mcp-workflow-project-name')).toHaveTextContent('Personal');
+			expect(getByTestId('workflow-location-project-name')).toHaveTextContent('Personal');
 		});
 	});
 
@@ -175,11 +274,11 @@ describe('WorkflowsTable', () => {
 				},
 			});
 
-			expect(getByTestId('mcp-workflow-project-name')).toHaveTextContent('My Project');
-			expect(getByTestId('mcp-workflow-folder-name')).toHaveTextContent('Parent Folder');
-			// Only one separator (between project and folder)
-			expect(getByTestId('mcp-workflow-ellipsis-separator')).toBeVisible();
-			expect(queryByTestId('mcp-workflow-grandparent-folder')).not.toBeInTheDocument();
+			expect(getByTestId('workflow-location-project-name')).toHaveTextContent('My Project');
+			expect(getByTestId('workflow-location-folder-name')).toHaveTextContent('Parent Folder');
+			// Separator between project and folder should be visible
+			expect(getByTestId('workflow-location-separator')).toBeVisible();
+			expect(queryByTestId('workflow-location-grandparent')).not.toBeInTheDocument();
 		});
 
 		it('should render workflow in nested folder with ellipsis', () => {
@@ -200,18 +299,18 @@ describe('WorkflowsTable', () => {
 				},
 			});
 
-			const { getByTestId, getAllByTestId } = createComponent({
+			const { getByTestId } = createComponent({
 				props: {
 					workflows: [workflow],
 					loading: false,
 				},
 			});
 
-			expect(getByTestId('mcp-workflow-project-name')).toHaveTextContent('My Project');
-			expect(getByTestId('mcp-workflow-folder-name')).toHaveTextContent('Child Folder');
-			expect(getByTestId('mcp-workflow-grandparent-folder')).toBeVisible();
-			// Multiple separators (between project and ellipsis, and between ellipsis and folder)
-			expect(getAllByTestId('mcp-workflow-ellipsis-separator').length).toBeGreaterThanOrEqual(2);
+			expect(getByTestId('workflow-location-project-name')).toHaveTextContent('My Project');
+			expect(getByTestId('workflow-location-folder-name')).toHaveTextContent('Child Folder');
+			expect(getByTestId('workflow-location-grandparent')).toBeVisible();
+			// Ellipsis separator (between ellipsis and folder)
+			expect(getByTestId('workflow-location-ellipsis-separator')).toBeVisible();
 		});
 	});
 
@@ -231,6 +330,25 @@ describe('WorkflowsTable', () => {
 			expect(getByTestId('mcp-workflow-description')).toHaveTextContent(
 				'This is a test workflow description',
 			);
+		});
+
+		it('should show "Click to edit" tooltip when description is present', async () => {
+			const workflow = createWorkflow({
+				description: 'Short description',
+			});
+
+			const { getByTestId } = createComponent({
+				props: {
+					workflows: [workflow],
+					loading: false,
+				},
+			});
+
+			await userEvent.hover(getByTestId('mcp-workflow-description-cell'));
+
+			await waitFor(() => {
+				expect(getTooltip()).toHaveTextContent('Click to edit');
+			});
 		});
 
 		it('should render warning when workflow has no description', () => {
@@ -439,7 +557,7 @@ describe('WorkflowsTable', () => {
 				},
 			});
 
-			const projectLink = getByTestId('mcp-workflow-project-link');
+			const projectLink = getByTestId('workflow-location-project-link');
 			expect(projectLink).toHaveAttribute('href', '/projects/project-456');
 		});
 	});
@@ -517,7 +635,7 @@ describe('WorkflowsTable', () => {
 			expect(workflowNames[2]).toHaveTextContent('Third Workflow');
 
 			// Verify project names (second one should show "Personal")
-			const projectNames = getAllByTestId('mcp-workflow-project-name');
+			const projectNames = getAllByTestId('workflow-location-project-name');
 			expect(projectNames).toHaveLength(3);
 			expect(projectNames[0]).toHaveTextContent('Project A');
 			expect(projectNames[1]).toHaveTextContent('Personal');
@@ -530,13 +648,13 @@ describe('WorkflowsTable', () => {
 			expect(emptyDescriptions).toHaveLength(1);
 
 			// Verify folder names (only workflows 2 and 3 have folders)
-			const folderNames = getAllByTestId('mcp-workflow-folder-name');
+			const folderNames = getAllByTestId('workflow-location-folder-name');
 			expect(folderNames).toHaveLength(2);
 			expect(folderNames[0]).toHaveTextContent('My Folder');
 			expect(folderNames[1]).toHaveTextContent('Nested Folder');
 
 			// Verify ellipsis for nested folder (only workflow 3)
-			const grandparentFolders = getAllByTestId('mcp-workflow-grandparent-folder');
+			const grandparentFolders = getAllByTestId('workflow-location-grandparent');
 			expect(grandparentFolders).toHaveLength(1);
 		});
 	});

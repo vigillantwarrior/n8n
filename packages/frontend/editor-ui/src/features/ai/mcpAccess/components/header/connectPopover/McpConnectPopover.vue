@@ -1,24 +1,20 @@
 <script setup lang="ts">
 import { useI18n } from '@n8n/i18n';
-import { ref, watch } from 'vue';
-import { N8nButton, N8nPopoverReka, N8nRadioButtons } from '@n8n/design-system';
+import { computed, ref } from 'vue';
+import { N8nButton, N8nPopover, N8nRadioButtons } from '@n8n/design-system';
 import MCPOAuthPopoverTab from '@/features/ai/mcpAccess/components/header/connectPopover/MCPOAuthPopoverTab.vue';
 import MCPAccessTokenPopoverTab from '@/features/ai/mcpAccess/components/header/connectPopover/MCPAccessTokenPopoverTab.vue';
-import { useRootStore } from '@n8n/stores/useRootStore';
 import { useTelemetry } from '@/app/composables/useTelemetry';
 import { useMCPStore } from '@/features/ai/mcpAccess/mcp.store';
-import { MCP_ENDPOINT, MCP_CONNECT_POPOVER_WIDTH } from '@/features/ai/mcpAccess/mcp.constants';
+import { MCP_CONNECT_POPOVER_WIDTH } from '@/features/ai/mcpAccess/mcp.constants';
 
 const i18n = useI18n();
 const telemetry = useTelemetry();
-const rootStore = useRootStore();
 const mcpStore = useMCPStore();
 
-const props = defineProps<{
+defineProps<{
 	disabled?: boolean;
 }>();
-
-const popoverOpen = ref(false);
 
 const TABS = {
 	ACCESS_TOKEN: 'accessToken',
@@ -30,13 +26,15 @@ const tabItems = ref([
 	{ value: TABS.ACCESS_TOKEN, label: i18n.baseText('settings.mcp.connectPopover.tab.accessToken') },
 ]);
 
-const serverUrl = ref(`${rootStore.urlBaseEditor}${MCP_ENDPOINT}`);
+const serverUrl = computed(() => mcpStore.serverUrl);
 
 const activeTab = ref(tabItems.value[0].value);
 
 const handlePopoverOpenChange = (isOpen: boolean) => {
-	popoverOpen.value = isOpen;
-	if (!isOpen) {
+	if (isOpen) {
+		mcpStore.openConnectPopover();
+	} else {
+		mcpStore.closeConnectPopover();
 		mcpStore.resetCurrentUserMCPKey();
 	}
 };
@@ -63,24 +61,13 @@ const trackCopyEvent = (payload: {
 		source: payload.source,
 	});
 };
-
-// Automatically open the popover when mcp access is turned on
-watch(
-	() => props.disabled,
-	(newValue) => {
-		if (!newValue) {
-			popoverOpen.value = true;
-		}
-	},
-);
 </script>
 
 <template>
 	<div>
-		<N8nPopoverReka
-			:id="'mcp-connect-popover'"
-			:open="popoverOpen"
-			:popper-options="{ strategy: 'fixed' }"
+		<N8nPopover
+			id="mcp-connect-popover"
+			:open="mcpStore.connectPopoverOpen"
 			:content-class="$style.popper"
 			:show-arrow="false"
 			:width="`${MCP_CONNECT_POPOVER_WIDTH}px`"
@@ -88,11 +75,11 @@ watch(
 		>
 			<template #trigger>
 				<N8nButton
+					variant="subtle"
 					data-test-id="mcp-connect-popover-trigger-button"
-					type="tertiary"
 					:disabled="disabled"
 				>
-					{{ i18n.baseText('generic.connect') }}
+					{{ i18n.baseText('settings.mcp.connectPopover.triggerLabel') }}
 				</N8nButton>
 			</template>
 			<template #content>
@@ -119,7 +106,7 @@ watch(
 					</main>
 				</div>
 			</template>
-		</N8nPopoverReka>
+		</N8nPopover>
 	</div>
 </template>
 

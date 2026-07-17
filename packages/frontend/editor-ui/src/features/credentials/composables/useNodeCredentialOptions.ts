@@ -14,7 +14,14 @@ import {
 	type INodeTypeDescription,
 	type NodeParameterValueType,
 } from 'n8n-workflow';
-import { computed, unref, type ComputedRef, type MaybeRef } from 'vue';
+import {
+	computed,
+	toValue,
+	unref,
+	type ComputedRef,
+	type MaybeRef,
+	type MaybeRefOrGetter,
+} from 'vue';
 
 export interface CredentialDropdownOption extends ICredentialsResponse {
 	typeDisplayName: string;
@@ -24,10 +31,15 @@ export function useNodeCredentialOptions(
 	node: ComputedRef<INodeUi | null>,
 	nodeType: ComputedRef<INodeTypeDescription | null>,
 	overrideCredType: MaybeRef<NodeParameterValueType | undefined>,
+	displayAllOptions: MaybeRefOrGetter<boolean> = false,
 ) {
 	const nodeHelpers = useNodeHelpers();
 	const credentialsStore = useCredentialsStore();
 	const mainNodeAuthField = computed(() => getMainAuthField(nodeType.value));
+	const hasOverride = computed(() => {
+		const override = unref(overrideCredType);
+		return typeof override === 'string' && override !== '';
+	});
 
 	const credentialTypesNodeDescriptions = computed(() =>
 		credentialsStore.getCredentialTypesNodeDescriptions(unref(overrideCredType), nodeType.value),
@@ -82,7 +94,7 @@ export function useNodeCredentialOptions(
 	}
 
 	function showMixedCredentials(credentialType: INodeCredentialDescription): boolean {
-		if (!node.value) {
+		if (!node.value || hasOverride.value) {
 			return false;
 		}
 
@@ -92,9 +104,17 @@ export function useNodeCredentialOptions(
 	}
 
 	function getAllRelatedCredentialTypes(credentialType: INodeCredentialDescription): string[] {
+		if (hasOverride.value) {
+			return [credentialType.name];
+		}
+
 		const credentialIsRequired = showMixedCredentials(credentialType);
 		if (credentialIsRequired) {
 			if (mainNodeAuthField.value) {
+				if (toValue(displayAllOptions)) {
+					return nodeType.value?.credentials?.map((cred) => cred.name) ?? [];
+				}
+
 				const credentials = getAllNodeCredentialForAuthType(
 					nodeType.value,
 					mainNodeAuthField.value.name,
@@ -106,13 +126,12 @@ export function useNodeCredentialOptions(
 	}
 
 	function isCredentialExisting(credentialType: INodeCredentialDescription): boolean {
-		if (!node.value?.credentials?.[credentialType.name]?.id) {
-			return false;
-		}
-		const { id } = node.value.credentials[credentialType.name];
+		const credential = node.value?.credentials?.[credentialType.name];
+		// Gateway-managed credentials have no real DB record but are properly configured
+		if (credential?.__aiGatewayManaged) return true;
+		if (!credential?.id) return false;
 		const options = getCredentialOptions([credentialType.name]);
-
-		return !!options.find((option: ICredentialsResponse) => option.id === id);
+		return !!options.find((option: ICredentialsResponse) => option.id === credential.id);
 	}
 
 	return {

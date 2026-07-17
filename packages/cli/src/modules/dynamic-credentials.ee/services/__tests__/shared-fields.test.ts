@@ -1,6 +1,14 @@
-import type { ICredentialType, INodeProperties } from 'n8n-workflow';
+import { Container } from '@n8n/di';
+import {
+	CREDENTIAL_BLANKING_VALUE,
+	type ICredentialType,
+	type INodeProperties,
+} from 'n8n-workflow';
+import type { Mocked } from 'vitest';
 
-import { extractSharedFields } from '../shared-fields';
+import type { CredentialTypes } from '@/credential-types';
+
+import { extractSharedFields, getChangedSharedFields } from '../shared-fields';
 
 describe('extractSharedFields', () => {
 	describe('with only static fields', () => {
@@ -197,6 +205,75 @@ describe('extractSharedFields', () => {
 		});
 	});
 
+	describe('getChangedSharedFields', () => {
+		const oauth2Credential: ICredentialType = {
+			name: 'oAuth2Api',
+			displayName: 'OAuth2 API',
+			properties: [
+				{ name: 'clientId', type: 'string', default: '' },
+				{ name: 'clientSecret', type: 'string', default: '' },
+				{ name: 'scope', type: 'string', default: '' },
+				{ name: 'accessToken', type: 'string', default: '', resolvableField: true },
+			] as INodeProperties[],
+		};
+
+		it('should detect a changed static field', () => {
+			const result = getChangedSharedFields(
+				oauth2Credential,
+				{ clientId: 'old', clientSecret: 'secret', scope: 'read' },
+				{ clientId: 'new', clientSecret: 'secret', scope: 'read' },
+			);
+
+			expect(result).toEqual(['clientId']);
+		});
+
+		it('should detect multiple changed static fields', () => {
+			const result = getChangedSharedFields(
+				oauth2Credential,
+				{ clientId: 'old', clientSecret: 'oldSecret', scope: 'read' },
+				{ clientId: 'new', clientSecret: 'newSecret', scope: 'read' },
+			);
+
+			expect(result).toEqual(['clientId', 'clientSecret']);
+		});
+
+		it('should return empty when nothing changed', () => {
+			const data = { clientId: 'id', clientSecret: 'secret', scope: 'read' };
+
+			expect(getChangedSharedFields(oauth2Credential, data, { ...data })).toEqual([]);
+		});
+
+		it('should ignore changes to resolvable (per-user) fields', () => {
+			const result = getChangedSharedFields(
+				oauth2Credential,
+				{ clientId: 'id', accessToken: 'oldToken' },
+				{ clientId: 'id', accessToken: 'newToken' },
+			);
+
+			expect(result).toEqual([]);
+		});
+
+		it('should ignore fields absent from the incoming payload (e.g. name-only edit)', () => {
+			const result = getChangedSharedFields(
+				oauth2Credential,
+				{ clientId: 'id', clientSecret: 'secret' },
+				{},
+			);
+
+			expect(result).toEqual([]);
+		});
+
+		it('should not treat the redaction placeholder as a change', () => {
+			const result = getChangedSharedFields(
+				oauth2Credential,
+				{ clientId: 'id', clientSecret: 'realSecret' },
+				{ clientId: 'id', clientSecret: CREDENTIAL_BLANKING_VALUE },
+			);
+
+			expect(result).toEqual([]);
+		});
+	});
+
 	describe('field order preservation', () => {
 		it('should preserve the order of fields in the result', () => {
 			const credentialType: ICredentialType = {
@@ -213,6 +290,268 @@ describe('extractSharedFields', () => {
 			const result = extractSharedFields(credentialType);
 
 			expect(result).toEqual(['fieldA', 'fieldC', 'fieldD']);
+		});
+	});
+
+	describe('credential hierarchy with extends', () => {
+		let mockCredentialTypes: Mocked<CredentialTypes>;
+
+		beforeEach(() => {
+			mockCredentialTypes = {
+				getByName: vi.fn(),
+			} as unknown as Mocked<CredentialTypes>;
+
+			vi.spyOn(Container, 'get').mockReturnValue(mockCredentialTypes);
+		});
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it('should merge properties from single parent credential', () => {
+			const parentCredential: ICredentialType = {
+				name: 'oAuth2Api',
+				displayName: 'OAuth2 API',
+				properties: [
+					{ name: 'clientId', type: 'string', default: '' },
+					{ name: 'clientSecret', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'googleOAuth2Api',
+				displayName: 'Google OAuth2 API',
+				extends: ['oAuth2Api'],
+				properties: [
+					{ name: 'scope', type: 'string', default: '' },
+					{ name: 'authUrl', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'oAuth2Api') return parentCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			expect(result).toEqual(['clientId', 'clientSecret', 'scope', 'authUrl']);
+			expect(mockCredentialTypes.getByName).toHaveBeenCalledWith('oAuth2Api');
+		});
+
+		it('should merge properties from multi-level hierarchy', () => {
+			const grandparentCredential: ICredentialType = {
+				name: 'httpAuth',
+				displayName: 'HTTP Auth',
+				properties: [{ name: 'url', type: 'string', default: '' }] as INodeProperties[],
+			};
+
+			const parentCredential: ICredentialType = {
+				name: 'oAuth2Api',
+				displayName: 'OAuth2 API',
+				extends: ['httpAuth'],
+				properties: [
+					{ name: 'clientId', type: 'string', default: '' },
+					{ name: 'clientSecret', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'googleOAuth2Api',
+				displayName: 'Google OAuth2 API',
+				extends: ['oAuth2Api'],
+				properties: [
+					{ name: 'scope', type: 'string', default: '' },
+					{ name: 'authUrl', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'httpAuth') return grandparentCredential;
+				if (name === 'oAuth2Api') return parentCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			expect(result).toEqual(['url', 'clientId', 'clientSecret', 'scope', 'authUrl']);
+			expect(mockCredentialTypes.getByName).toHaveBeenCalledWith('oAuth2Api');
+			expect(mockCredentialTypes.getByName).toHaveBeenCalledWith('httpAuth');
+		});
+
+		it('should handle property overriding in child credentials', () => {
+			const parentCredential: ICredentialType = {
+				name: 'baseApi',
+				displayName: 'Base API',
+				properties: [
+					{ name: 'url', type: 'string', default: 'https://api.example.com' },
+					{ name: 'timeout', type: 'number', default: 30 },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'customApi',
+				displayName: 'Custom API',
+				extends: ['baseApi'],
+				properties: [
+					{ name: 'url', type: 'string', default: 'https://custom.example.com' }, // Override
+					{ name: 'apiKey', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'baseApi') return parentCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			// url should appear only once (overridden by child), at parent's original position
+			expect(result).toEqual(['url', 'timeout', 'apiKey']);
+			expect(result.filter((field) => field === 'url')).toHaveLength(1);
+		});
+
+		it('should handle mixed resolvable fields across hierarchy', () => {
+			const parentCredential: ICredentialType = {
+				name: 'oAuth2Api',
+				displayName: 'OAuth2 API',
+				properties: [
+					{ name: 'clientId', type: 'string', default: '' },
+					{ name: 'clientSecret', type: 'string', default: '' },
+					{ name: 'accessToken', type: 'string', default: '', resolvableField: true },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'googleOAuth2Api',
+				displayName: 'Google OAuth2 API',
+				extends: ['oAuth2Api'],
+				properties: [
+					{ name: 'scope', type: 'string', default: '' },
+					{ name: 'refreshToken', type: 'string', default: '', resolvableField: true },
+				] as INodeProperties[],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'oAuth2Api') return parentCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			// Only non-resolvable fields from both parent and child
+			expect(result).toEqual(['clientId', 'clientSecret', 'scope']);
+			expect(result).not.toContain('accessToken');
+			expect(result).not.toContain('refreshToken');
+		});
+
+		it('should handle doNotInherit flag correctly', () => {
+			const parentCredential: ICredentialType = {
+				name: 'baseApi',
+				displayName: 'Base API',
+				properties: [
+					{ name: 'url', type: 'string', default: '' },
+					{ name: 'internalField', type: 'string', default: '', doNotInherit: true },
+					{ name: 'timeout', type: 'number', default: 30 },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'customApi',
+				displayName: 'Custom API',
+				extends: ['baseApi'],
+				properties: [{ name: 'apiKey', type: 'string', default: '' }] as INodeProperties[],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'baseApi') return parentCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			// internalField should not be inherited
+			expect(result).toEqual(['url', 'timeout', 'apiKey']);
+			expect(result).not.toContain('internalField');
+		});
+
+		it('should handle multiple parent types (multiple extends)', () => {
+			const authCredential: ICredentialType = {
+				name: 'authBase',
+				displayName: 'Auth Base',
+				properties: [
+					{ name: 'username', type: 'string', default: '' },
+					{ name: 'password', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			const httpCredential: ICredentialType = {
+				name: 'httpBase',
+				displayName: 'HTTP Base',
+				properties: [
+					{ name: 'url', type: 'string', default: '' },
+					{ name: 'timeout', type: 'number', default: 30 },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'combinedApi',
+				displayName: 'Combined API',
+				extends: ['authBase', 'httpBase'],
+				properties: [{ name: 'apiKey', type: 'string', default: '' }] as INodeProperties[],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'authBase') return authCredential;
+				if (name === 'httpBase') return httpCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			// Should include fields from both parents
+			expect(result).toEqual(['username', 'password', 'url', 'timeout', 'apiKey']);
+		});
+
+		it('should handle empty extends array', () => {
+			const credentialType: ICredentialType = {
+				name: 'simpleApi',
+				displayName: 'Simple API',
+				extends: [],
+				properties: [{ name: 'apiKey', type: 'string', default: '' }] as INodeProperties[],
+			};
+
+			const result = extractSharedFields(credentialType);
+
+			expect(result).toEqual(['apiKey']);
+			expect(mockCredentialTypes.getByName).not.toHaveBeenCalled();
+		});
+
+		it('should handle credential with no properties but has parent', () => {
+			const parentCredential: ICredentialType = {
+				name: 'oAuth2Api',
+				displayName: 'OAuth2 API',
+				properties: [
+					{ name: 'clientId', type: 'string', default: '' },
+					{ name: 'clientSecret', type: 'string', default: '' },
+				] as INodeProperties[],
+			};
+
+			const childCredential: ICredentialType = {
+				name: 'specificOAuth2',
+				displayName: 'Specific OAuth2',
+				extends: ['oAuth2Api'],
+				properties: [],
+			};
+
+			mockCredentialTypes.getByName.mockImplementation((name: string) => {
+				if (name === 'oAuth2Api') return parentCredential;
+				throw new Error(`Unknown credential type: ${name}`);
+			});
+
+			const result = extractSharedFields(childCredential);
+
+			expect(result).toEqual(['clientId', 'clientSecret']);
 		});
 	});
 });

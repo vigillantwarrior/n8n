@@ -34,7 +34,7 @@ export class InsightsService {
 			return;
 		}
 
-		const { InsightsCollectionService } = await import('./insights-collection.service');
+		const { InsightsCollectionService } = await import('./insights-collection.service.js');
 		const collectionService = Container.get(InsightsCollectionService);
 		if (enable) {
 			collectionService.init();
@@ -52,20 +52,18 @@ export class InsightsService {
 	@OnLeaderTakeover()
 	startCompactionAndPruningTimers() {
 		this.compactionService.startCompactionTimer();
-		if (this.pruningService.isPruningEnabled) {
-			this.pruningService.startPruningTimer();
-		}
+		this.pruningService.startPruningTimer();
 	}
 
 	@OnLeaderStepdown()
-	stopCompactionAndPruningTimers() {
-		this.compactionService.stopCompactionTimer();
+	async stopCompactionAndPruningTimers() {
 		this.pruningService.stopPruningTimer();
+		await this.compactionService.stopCompactionTimer();
 	}
 
 	async shutdown() {
 		await this.toggleCollectionService(false);
-		this.stopCompactionAndPruningTimers();
+		await this.stopCompactionAndPruningTimers();
 	}
 
 	async getInsightsSummary({

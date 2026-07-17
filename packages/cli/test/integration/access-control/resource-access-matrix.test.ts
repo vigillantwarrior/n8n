@@ -48,8 +48,8 @@ let testCredentialId: string;
 describe('Resource Access Control Matrix Tests', () => {
 	beforeAll(async () => {
 		mockInstance(UserManagementMailer, {
-			invite: jest.fn(),
-			passwordReset: jest.fn(),
+			invite: vi.fn(),
+			passwordReset: vi.fn(),
 		});
 
 		// Create foundation users
@@ -176,7 +176,7 @@ describe('Resource Access Control Matrix Tests', () => {
 							id: 'uuid-1234',
 							parameters: {},
 							name: 'Start',
-							type: 'n8n-nodes-base.start',
+							type: 'n8n-nodes-base.manualTrigger',
 							typeVersion: 1,
 							position: [240, 300],
 						},
@@ -258,7 +258,7 @@ describe('Resource Access Control Matrix Tests', () => {
 							id: 'uuid-1234',
 							parameters: {},
 							name: 'Start',
-							type: 'n8n-nodes-base.start',
+							type: 'n8n-nodes-base.manualTrigger',
 							typeVersion: 1,
 							position: [240, 300],
 						},
@@ -341,12 +341,12 @@ describe('Resource Access Control Matrix Tests', () => {
 				expect(response.body.data).toBeDefined();
 			});
 
-			test('POST /credentials should return 400', async () => {
+			test('POST /credentials should return 403', async () => {
 				const credentialPayload = randomCredentialPayload();
 				await testUserAgent
 					.post('/credentials')
 					.send({ ...credentialPayload, projectId: teamProject.id })
-					.expect(400);
+					.expect(403);
 			});
 
 			test('PATCH /credentials/:id should return 403', async () => {
